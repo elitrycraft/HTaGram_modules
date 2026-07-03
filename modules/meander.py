@@ -131,7 +131,6 @@ async def safe_send_quest(event, quest):
         print(f"[ERROR] Ошибка при отправке квеста: {e}")
         await asyncio.sleep(1)
         try:
-            # Повторная попытка
             await send_quest_with_photo(event, quest)
         except Exception as e2:
             print(f"[ERROR] Вторая попытка также не удалась: {e2}")
@@ -143,7 +142,7 @@ async def run(client, restart_userbot):
     """Запуск плагина"""
     
     # === ОБРАБОТЧИК ССЫЛОК ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'https://backend\.meander\.sbs/share/quest/[a-f0-9-]+'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'https://backend\.meander\.sbs/share/quest/[a-f0-9-]+')))
     async def handle_quest_link(event):
         """Обрабатывает ссылки на квесты: подтягивает описание и фото"""
         match = re.search(r'/share/quest/([a-f0-9-]+)', event.text)
@@ -168,7 +167,7 @@ async def run(client, restart_userbot):
         await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quest ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest$|^-quest random$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest$|^-quest random$')))
     async def random_quest(event):
         """Показывает случайный квест"""
         quests = get_cached_quests()
@@ -187,13 +186,14 @@ async def run(client, restart_userbot):
         await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quests ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quests(?:\s+(\d+))?$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quests(?:\s+(\d+))?$')))
     async def list_quests(event):
         """Показывает список квестов с пагинацией"""
         page = 1
-        if event.pattern_match and event.pattern_match.group(1):
+        match = re.search(r'^-quests(?:\s+(\d+))?$', event.text)
+        if match and match.group(1):
             try:
-                page = int(event.pattern_match.group(1))
+                page = int(match.group(1))
             except:
                 page = 1
         
@@ -229,10 +229,13 @@ async def run(client, restart_userbot):
         await event.edit(text)
     
     # === КОМАНДА: -quest info ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest info (.+)$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest info (.+)$')))
     async def quest_info(event):
         """Показывает информацию о конкретном квесте"""
-        query = event.pattern_match.group(1).strip()
+        match = re.search(r'^-quest info (.+)$', event.text)
+        if not match:
+            return
+        query = match.group(1).strip()
         
         quests = get_cached_quests()
         if not quests:
@@ -250,7 +253,7 @@ async def run(client, restart_userbot):
         await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quest stats ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest stats$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest stats$')))
     async def quest_stats(event):
         """Показывает статистику по квестам"""
         quests = get_cached_quests()
@@ -298,7 +301,7 @@ async def run(client, restart_userbot):
         await event.edit(text)
     
     # === КОМАНДА: -quest top ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest top$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest top$')))
     async def quest_top(event):
         """Показывает топ-5 квестов по рейтингу"""
         quests = get_cached_quests()
@@ -330,7 +333,7 @@ async def run(client, restart_userbot):
         await event.edit(text)
     
     # === КОМАНДА: -quest refresh ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest refresh$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest refresh$')))
     async def refresh_cache(event):
         """Принудительное обновление кеша"""
         await event.edit("🔄 Обновление кеша квестов...")
@@ -341,7 +344,7 @@ async def run(client, restart_userbot):
             await event.edit("❌ Ошибка обновления кеша.")
     
     # === КОМАНДА: -quest help ===
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest help$'))
+    @client.on(events.NewMessage(outgoing=True, pattern=re.compile(r'^-quest help$')))
     async def quest_help(event):
         """Показывает справку по командам"""
         text = """
