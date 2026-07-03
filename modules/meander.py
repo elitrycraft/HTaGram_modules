@@ -5,11 +5,11 @@ import aiohttp
 import json
 from datetime import datetime
 import re
+import asyncio
 
 # ===== КОНФИГУРАЦИЯ =====
 MEANDER_API = "https://backend.meander.sbs/quests"
 MEANDER_SHARE = "https://backend.meander.sbs/share/quest/"
-CACHE_FILE = "quests_cache.json"
 CACHE_TIME = 300  # 5 минут кеширования
 
 quest_cache = {
@@ -20,29 +20,41 @@ quest_cache = {
 # ===== ФУНКЦИИ =====
 
 async def fetch_quests():
-    """Получает список квестов из API"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(MEANDER_API) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    quest_cache['data'] = data
-                    quest_cache['last_update'] = time.time()
-                    return data
-                else:
-                    return None
-    except Exception as e:
-        print(f"[ERROR] Не удалось получить квесты: {e}")
-        return None
+    """Получает список квестов из API с повторными попытками"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(MEANDER_API) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        quest_cache['data'] = data
+                        quest_cache['last_update'] = time.time()
+                        return data
+                    else:
+                        print(f"[ERROR] API вернул статус {resp.status}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+        except Exception as e:
+            print(f"[ERROR] Попытка {attempt+1}/{max_retries} не удалась: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+                continue
+            return None
+    return None
 
 def get_cached_quests():
     """Возвращает кешированные квесты или загружает новые"""
-    if time.time() - quest_cache['last_update'] > CACHE_TIME:
+    if time.time() - quest_cache['last_update'] > CACHE_TIME or not quest_cache['data']:
         return None
     return quest_cache['data']
 
 def find_quest_by_id_or_title(query, quests):
     """Ищет квест по ID или названию"""
+    if not quests:
+        return None
     for q in quests:
         if q.get('id') == query:
             return q
@@ -53,9 +65,8 @@ def find_quest_by_id_or_title(query, quests):
 def format_quest_caption(quest):
     """Форматирует описание квеста для подписи к фото"""
     description = quest.get('description', 'Нет описания')
-    # Обрезаем описание до 400 символов
-    if len(description) > 400:
-        description = description[:400] + '...'
+    if len(description) > 500:
+        description = description[:500] + '...'
     
     genres = ', '.join(quest.get('genres', ['Неизвестно']))
     rating = quest.get('average_rating', 'Нет')
@@ -80,26 +91,26 @@ def format_quest_short(quest, index):
     return f"{index}. **{quest.get('title', 'Без названия')}** — {quest.get('author_name', 'Неизвестен')} ⭐{quest.get('average_rating', '?')}"
 
 async def send_quest_with_photo(event, quest):
-    """Отправляет квест с фото и описанием (редактирует исходное сообщение)"""
+    """Отправляет квест с фото и описанием (удаляет команду, отправляет новое сообщение)"""
     if not quest:
         await event.edit("❌ Квест не найден.")
         return
     
-    # Получаем URL превью
     preview_url = quest.get('preview_image_url')
     caption = format_quest_caption(quest)
     
-    # Удаляем исходное сообщение (если это команда)
-    # И отправляем новое с фото
+    try:
+        # Удаляем исходное сообщение с командой
+        await event.delete()
+    except:
+        pass
+    
+    # Отправляем новое сообщение с фото
     if preview_url:
         try:
-            # Скачиваем изображение
             async with aiohttp.ClientSession() as session:
                 async with session.get(preview_url) as resp:
                     if resp.status == 200:
-                        # Удаляем команду
-                        await event.delete()
-                        # Отправляем фото с подписью
                         await event.respond(
                             file=await resp.read(),
                             caption=caption,
@@ -110,7 +121,21 @@ async def send_quest_with_photo(event, quest):
             print(f"[ERROR] Не удалось загрузить фото: {e}")
     
     # Если фото не загрузилось, отправляем текстовое сообщение
-    await event.edit(caption)
+    await event.respond(caption, parse_mode='markdown')
+
+async def safe_send_quest(event, quest):
+    """Безопасная отправка квеста с повторной попыткой при ошибке"""
+    try:
+        await send_quest_with_photo(event, quest)
+    except Exception as e:
+        print(f"[ERROR] Ошибка при отправке квеста: {e}")
+        await asyncio.sleep(1)
+        try:
+            # Повторная попытка
+            await send_quest_with_photo(event, quest)
+        except Exception as e2:
+            print(f"[ERROR] Вторая попытка также не удалась: {e2}")
+            await event.respond("❌ Не удалось отправить квест. Попробуй позже.")
 
 # ===== ПЛАГИН =====
 
@@ -121,35 +146,31 @@ async def run(client, restart_userbot):
     @client.on(events.NewMessage(outgoing=True, pattern=r'https://backend\.meander\.sbs/share/quest/[a-f0-9-]+'))
     async def handle_quest_link(event):
         """Обрабатывает ссылки на квесты: подтягивает описание и фото"""
-        # Извлекаем ID из ссылки
         match = re.search(r'/share/quest/([a-f0-9-]+)', event.text)
         if not match:
             return
         
         quest_id = match.group(1)
         
-        # Получаем квесты
         quests = get_cached_quests()
         if not quests:
+            await event.edit("🔄 Загрузка квестов...")
             quests = await fetch_quests()
             if not quests:
-                await event.edit("❌ Не удалось загрузить квесты.")
+                await event.edit("❌ Не удалось загрузить квесты. Попробуй позже.")
                 return
         
-        # Ищем квест
         quest = find_quest_by_id_or_title(quest_id, quests)
         if not quest:
             await event.edit(f"❌ Квест не найден: {quest_id}")
             return
         
-        # Отправляем с фото
-        await send_quest_with_photo(event, quest)
+        await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quest ===
     @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest$|^-quest random$'))
     async def random_quest(event):
         """Показывает случайный квест"""
-        # Получаем квесты
         quests = get_cached_quests()
         if not quests:
             await event.edit("🔄 Загрузка квестов...")
@@ -162,11 +183,8 @@ async def run(client, restart_userbot):
             await event.edit("❌ Нет доступных квестов.")
             return
         
-        # Выбираем случайный
         quest = random.choice(quests)
-        
-        # Отправляем с фото
-        await send_quest_with_photo(event, quest)
+        await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quests ===
     @client.on(events.NewMessage(outgoing=True, pattern=r'^-quests(?:\s+(\d+))?$'))
@@ -174,7 +192,10 @@ async def run(client, restart_userbot):
         """Показывает список квестов с пагинацией"""
         page = 1
         if event.pattern_match and event.pattern_match.group(1):
-            page = int(event.pattern_match.group(1))
+            try:
+                page = int(event.pattern_match.group(1))
+            except:
+                page = 1
         
         quests = get_cached_quests()
         if not quests:
@@ -191,6 +212,8 @@ async def run(client, restart_userbot):
         per_page = 10
         total_pages = (len(quests) + per_page - 1) // per_page
         
+        if page < 1:
+            page = 1
         if page > total_pages:
             page = total_pages
         
@@ -209,7 +232,7 @@ async def run(client, restart_userbot):
     @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest info (.+)$'))
     async def quest_info(event):
         """Показывает информацию о конкретном квесте"""
-        query = event.pattern_match.group(1)
+        query = event.pattern_match.group(1).strip()
         
         quests = get_cached_quests()
         if not quests:
@@ -224,7 +247,7 @@ async def run(client, restart_userbot):
             await event.edit(f"❌ Квест не найден: {query}")
             return
         
-        await send_quest_with_photo(event, quest)
+        await safe_send_quest(event, quest)
     
     # === КОМАНДА: -quest stats ===
     @client.on(events.NewMessage(outgoing=True, pattern=r'^-quest stats$'))
@@ -238,9 +261,14 @@ async def run(client, restart_userbot):
                 await event.edit("❌ Не удалось загрузить квесты. Попробуй позже.")
                 return
         
+        if not quests:
+            await event.edit("❌ Нет доступных квестов.")
+            return
+        
         total = len(quests)
         genres = {}
         avg_rating = 0
+        total_downloads = 0
         
         for q in quests:
             for g in q.get('genres', []):
@@ -248,6 +276,7 @@ async def run(client, restart_userbot):
             rating = q.get('average_rating')
             if rating:
                 avg_rating += float(rating)
+            total_downloads += q.get('downloads_count', 0)
         
         avg_rating = avg_rating / total if total > 0 else 0
         top_genres = sorted(genres.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -258,6 +287,7 @@ async def run(client, restart_userbot):
 
 📌 Всего квестов: {total}
 ⭐ Средний рейтинг: {avg_rating:.1f}
+📥 Всего скачиваний: {total_downloads}
 
 🏷️ **Топ-5 жанров:**
 {top_genres_text}
@@ -279,6 +309,10 @@ async def run(client, restart_userbot):
                 await event.edit("❌ Не удалось загрузить квесты. Попробуй позже.")
                 return
         
+        if not quests:
+            await event.edit("❌ Нет доступных квестов.")
+            return
+        
         sorted_quests = sorted(
             [q for q in quests if q.get('average_rating')],
             key=lambda x: float(x['average_rating']),
@@ -290,7 +324,8 @@ async def run(client, restart_userbot):
             rating = q.get('average_rating', 'Нет')
             title = q.get('title', 'Без названия')
             author = q.get('author_name', 'Неизвестен')
-            text += f"{i}. **{title}** — {author} ⭐{rating}\n"
+            downloads = q.get('downloads_count', 0)
+            text += f"{i}. **{title}** — {author}\n   ⭐{rating} | 📥{downloads}\n"
         
         await event.edit(text)
     
@@ -313,7 +348,7 @@ async def run(client, restart_userbot):
 🎮 **Meander Quest Bot**
 
 **Команды:**
-`-quest` — случайный квест
+`-quest` — случайный квест с фото
 `-quests [страница]` — список квестов
 `-quest info <название>` — детали квеста
 `-quest stats` — статистика
@@ -329,4 +364,6 @@ async def run(client, restart_userbot):
         await event.edit(text)
     
     # Автоматическая загрузка кеша при старте
+    print("🔄 Загрузка квестов в кеш...")
     await fetch_quests()
+    print(f"✅ Загружено {len(quest_cache['data'])} квестов")
